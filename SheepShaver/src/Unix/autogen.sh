@@ -2,6 +2,11 @@
 # Run this to generate all the initial makefiles, etc.
 # This was lifted from the Gimp, and adapted slightly by
 # Christian Bauer.
+#
+# GTK4 integration: if deps/install/lib/pkgconfig/gtk4.pc exists (built by
+# deps/build_deps.sh), PKG_CONFIG_PATH is set automatically so configure
+# finds the bundled GTK4 4.18.3.  To build everything from scratch:
+#   cd SheepShaver/src && bash build_sheepshaver.sh
 
 DIE=0
 
@@ -50,6 +55,16 @@ aclocalinclude="$ACLOCAL_FLAGS"; \
  echo "done.") 
 
 rm -f config.cache
+
+# Prepend locally built GTK4 to PKG_CONFIG_PATH if available
+DEPS_INSTALL="$(cd "$(dirname "$0")/../deps/install" 2>/dev/null && pwd)" || true
+if [ -f "${DEPS_INSTALL}/lib/pkgconfig/gtk4.pc" ]; then
+    echo " + Found locally built GTK4 in deps/install — prepending to PKG_CONFIG_PATH"
+    PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export PKG_CONFIG_PATH
+    LDFLAGS="${LDFLAGS:-} -Wl,-rpath,${DEPS_INSTALL}/lib"
+    export LDFLAGS
+fi
 
 if [ x"$NO_CONFIGURE" = "x" ]; then
     echo " + Running 'configure $@':"

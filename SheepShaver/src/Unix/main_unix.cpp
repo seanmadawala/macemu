@@ -781,8 +781,7 @@ int main(int argc, char **argv)
 #ifdef ENABLE_GTK
 	if (!gui_connection) {
 		// Init GTK
-		gtk_set_locale();
-		gtk_init(&argc, &argv);
+		gtk_init();
 	}
 #endif
 
@@ -2196,14 +2195,14 @@ void SheepMem::Exit(void)
  */
 
 #ifdef ENABLE_GTK
-static void dl_destroyed(void)
+static void dl_alert_finished(GObject *source, GAsyncResult *result, gpointer user_data)
 {
-	gtk_main_quit();
-}
-
-static void dl_quit(GtkWidget *dialog)
-{
-	gtk_widget_destroy(dialog);
+	GMainLoop *loop = (GMainLoop *)user_data;
+	GError *error = NULL;
+	gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(source), result, &error);
+	if (error)
+		g_error_free(error);
+	g_main_loop_quit(loop);
 }
 
 void display_alert(int title_id, int prefix_id, int button_id, const char *text)
@@ -2211,25 +2210,18 @@ void display_alert(int title_id, int prefix_id, int button_id, const char *text)
 	char str[256];
 	sprintf(str, GetString(prefix_id), text);
 
-	GtkWidget *dialog = gtk_dialog_new();
-	gtk_window_set_title(GTK_WINDOW(dialog), GetString(title_id));
-	gtk_container_border_width(GTK_CONTAINER(dialog), 5);
-	gtk_widget_set_uposition(GTK_WIDGET(dialog), 100, 150);
-	gtk_signal_connect(GTK_OBJECT(dialog), "destroy", GTK_SIGNAL_FUNC(dl_destroyed), NULL);
+	const char *buttons[] = { GetString(button_id), NULL };
+	GtkAlertDialog *alert = gtk_alert_dialog_new("%s", GetString(title_id));
+	gtk_alert_dialog_set_detail(alert, str);
+	gtk_alert_dialog_set_buttons(alert, buttons);
+	gtk_alert_dialog_set_default_button(alert, 0);
+	gtk_alert_dialog_set_cancel_button(alert, 0);
 
-	GtkWidget *label = gtk_label_new(str);
-	gtk_widget_show(label);
-	gtk_box_pack_start(GTK_BOX(GTK_DIALOG(dialog)->vbox), label, TRUE, TRUE, 0);
-
-	GtkWidget *button = gtk_button_new_with_label(GetString(button_id));
-	gtk_widget_show(button);
-	gtk_signal_connect_object(GTK_OBJECT(button), "clicked", GTK_SIGNAL_FUNC(dl_quit), GTK_OBJECT(dialog));
-	gtk_box_pack_start(GTK_BOX(GTK_DIALOG(dialog)->action_area), button, FALSE, FALSE, 0);
-	GTK_WIDGET_SET_FLAGS(button, GTK_CAN_DEFAULT);
-	gtk_widget_grab_default(button);
-	gtk_widget_show(dialog);
-
-	gtk_main();
+	GMainLoop *loop = g_main_loop_new(NULL, FALSE);
+	gtk_alert_dialog_choose(alert, NULL, NULL, dl_alert_finished, loop);
+	g_main_loop_run(loop);
+	g_main_loop_unref(loop);
+	g_object_unref(alert);
 }
 #endif
 

@@ -45,6 +45,11 @@
 #include <esd.h>
 #endif
 
+#ifdef ENABLE_PULSE
+#include <pulse/simple.h>
+#include <pulse/error.h>
+#endif
+
 #define DEBUG 0
 #include "debug.h"
 
@@ -58,6 +63,10 @@ static int audio_channel_count_index = 0;
 static bool is_dsp_audio = false;					// Flag: is DSP audio
 static int audio_fd = -1;							// fd of dsp or ESD
 static int mixer_fd = -1;							// fd of mixer
+#ifdef ENABLE_PULSE
+static pa_simple *pulse_handle = NULL;				// PulseAudio connection
+static bool is_pulse_audio = false;				// Flag: using PulseAudio
+#endif
 static sem_t audio_irq_done_sem;					// Signal from interrupt to streaming thread: data block read
 static bool sem_inited = false;						// Flag: audio_irq_done_sem initialized
 static int sound_buffer_size;						// Size of sound buffer in bytes
@@ -237,8 +246,66 @@ static bool open_esd(void)
 #endif
 }
 
+// Init using PulseAudio, returns false on error
+static bool open_pulse(void)
+{
+#ifdef ENABLE_PULSE
+	if (audio_sample_sizes.empty()) {
+		audio_sample_rates.push_back(11025 << 16);
+		audio_sample_rates.push_back(22050 << 16);
+		audio_sample_rates.push_back(44100 << 16);
+		audio_sample_sizes.push_back(8);
+		audio_sample_sizes.push_back(16);
+		audio_channel_counts.push_back(1);
+		audio_channel_counts.push_back(2);
+		audio_sample_rate_index = audio_sample_rates.size() - 1;
+		audio_sample_size_index = audio_sample_sizes.size() - 1;
+		audio_channel_count_index = audio_channel_counts.size() - 1;
+	}
+
+	pa_sample_spec ss;
+	ss.rate     = audio_sample_rates[audio_sample_rate_index] >> 16;
+	ss.channels = audio_channel_counts[audio_channel_count_index];
+	if (audio_sample_sizes[audio_sample_size_index] == 8)
+		ss.format = PA_SAMPLE_U8;
+	else
+#if WORDS_BIGENDIAN
+		ss.format = PA_SAMPLE_S16BE;
+#else
+		ss.format = PA_SAMPLE_S16LE;
+#endif
+
+	int error;
+	pulse_handle = pa_simple_new(NULL, "SheepShaver", PA_STREAM_PLAYBACK,
+	                             NULL, "audio", &ss, NULL, NULL, &error);
+	if (!pulse_handle) {
+		fprintf(stderr, "WARNING: Cannot open PulseAudio: %s\n", pa_strerror(error));
+		return false;
+	}
+
+	printf("Using PulseAudio audio output\n");
+	is_pulse_audio = true;
+#if WORDS_BIGENDIAN
+	little_endian = false;
+#else
+	little_endian = (audio_sample_sizes[audio_sample_size_index] == 16);
+#endif
+	silence_byte = (audio_sample_sizes[audio_sample_size_index] == 8) ? 0x80 : 0;
+	audio_frames_per_block = 4096;
+	return true;
+#else
+	return false;
+#endif
+}
+
 static bool open_audio(void)
 {
+#ifdef ENABLE_PULSE
+	// Try PulseAudio first (most common on modern Linux)
+	if (open_pulse())
+		goto dev_opened;
+#endif
+
 #ifdef ENABLE_ESD
 	// If ESPEAKER is set, the user probably wants to use ESD, so try that first
 	if (getenv("ESPEAKER"))
@@ -327,6 +394,15 @@ static void close_audio(void)
 		audio_fd = -1;
 	}
 
+#ifdef ENABLE_PULSE
+	// Close PulseAudio connection
+	if (pulse_handle) {
+		pa_simple_free(pulse_handle);
+		pulse_handle = NULL;
+		is_pulse_audio = false;
+	}
+#endif
+
 	audio_open = false;
 }
 
@@ -334,7 +410,7 @@ void AudioExit(void)
 {
 	// Stop the device immediately. Otherwise, close() sends
 	// SNDCTL_DSP_SYNC, which may hang
-	if (is_dsp_audio)
+	if (is_dsp_audio && audio_fd >= 0)
 		ioctl(audio_fd, SNDCTL_DSP_RESET, 0);
 
 	// Close audio device
@@ -405,11 +481,17 @@ static void *stream_func(void *arg)
 				if (work_size == 0)
 					goto silence;
 
-				// Send data to DSP
-				if (work_size == sound_buffer_size && !little_endian)
+				// Send data to audio device
+				if (work_size == sound_buffer_size && !little_endian) {
+#ifdef ENABLE_PULSE
+					if (is_pulse_audio) {
+						int err;
+						pa_simple_write(pulse_handle, Mac2HostAddr(ReadMacInt32(apple_stream_info + scd_buffer)), sound_buffer_size, &err);
+					} else
+#endif
 					write(audio_fd, Mac2HostAddr(ReadMacInt32(apple_stream_info + scd_buffer)), sound_buffer_size);
-				else {
-					// Last buffer or little-endian DSP
+				} else {
+					// Last buffer or little-endian device
 					if (little_endian) {
 						int16 *p = (int16 *)Mac2HostAddr(ReadMacInt32(apple_stream_info + scd_buffer));
 						for (int i=0; i<work_size/2; i++)
@@ -417,6 +499,12 @@ static void *stream_func(void *arg)
 					} else
 						Mac2Host_memcpy(last_buffer, ReadMacInt32(apple_stream_info + scd_buffer), work_size);
 					memset((uint8 *)last_buffer + work_size, silence_byte, sound_buffer_size - work_size);
+#ifdef ENABLE_PULSE
+					if (is_pulse_audio) {
+						int err;
+						pa_simple_write(pulse_handle, last_buffer, sound_buffer_size, &err);
+					} else
+#endif
 					write(audio_fd, last_buffer, sound_buffer_size);
 				}
 				D(bug("stream: data written\n"));
@@ -426,7 +514,14 @@ static void *stream_func(void *arg)
 		} else {
 
 			// Audio not active, play silence
-silence:	write(audio_fd, silent_buffer, sound_buffer_size);
+silence:
+#ifdef ENABLE_PULSE
+			if (is_pulse_audio) {
+				int err;
+				pa_simple_write(pulse_handle, silent_buffer, sound_buffer_size, &err);
+			} else
+#endif
+			write(audio_fd, silent_buffer, sound_buffer_size);
 		}
 	}
 	delete[] silent_buffer;

@@ -37,14 +37,16 @@ AC_ARG_ENABLE(xf86-vidmode, [  --enable-xf86-vidmode   use the XFree86 VidMode e
 AC_ARG_ENABLE(vosf,         [  --enable-vosf           enable video on SEGV signals [default=yes]], [WANT_VOSF=$enableval], [WANT_VOSF=yes])
 AC_ARG_ENABLE(standalone-gui,[  --enable-standalone-gui enable a standalone GUI prefs editor [default=no]], [WANT_STANDALONE_GUI=$enableval], [WANT_STANDALONE_GUI=no])
 AC_ARG_WITH(esd,            [  --with-esd              support ESD for sound under Linux/FreeBSD [default=yes]], [WANT_ESD=$withval], [WANT_ESD=yes])
+AC_ARG_WITH(pulseaudio,     [  --with-pulseaudio       support PulseAudio for sound [default=yes]], [WANT_PULSE=$withval], [WANT_PULSE=yes])
 AC_ARG_WITH(gtk,            [  --with-gtk              use GTK user interface [default=yes]],
   [case "$withval" in
    gtk1)      WANT_GTK="gtk";;
    gtk|gtk2)  WANT_GTK="$withval";;
-   yes)       WANT_GTK="gtk2 gtk";;
+   gtk4)      WANT_GTK="gtk4";;
+   yes)       WANT_GTK="gtk4 gtk2 gtk";;
    *)         WANT_GTK="no";;
    esac],
-  [WANT_GTK="gtk2 gtk"])
+  [WANT_GTK="gtk4 gtk2 gtk"])
 AC_ARG_WITH(mon,            [  --with-mon              use mon as debugger [default=yes]], [WANT_MON=$withval], [WANT_MON=yes])
 AC_ARG_WITH(dgcc,           [  --with-dgcc=COMPILER    use C++ COMPILER to compile synthetic opcodes or 'precompiled'], [DYNGEN_CC=$withval])
 
@@ -335,8 +337,43 @@ if [[ "x$WANT_XF86_VIDMODE" = "xyes" ]]; then
   ])
 fi
 
+dnl Check for locally-built dependencies in deps/install/ (built by deps/build_deps.sh).
+dnl This allows a self-contained GTK4 4.18.3 to be used without relying on system GTK4.
+DEPS_INSTALL="${srcdir}/../deps/install"
+AC_MSG_CHECKING([for locally built GTK4 in deps/install])
+if test -f "${DEPS_INSTALL}/lib/pkgconfig/gtk4.pc"; then
+  AC_MSG_RESULT([found])
+  PKG_CONFIG_PATH="${DEPS_INSTALL}/lib/pkgconfig:${DEPS_INSTALL}/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+  export PKG_CONFIG_PATH
+  LDFLAGS="${LDFLAGS} -Wl,-rpath,${DEPS_INSTALL}/lib"
+  CPPFLAGS="${CPPFLAGS} -I${DEPS_INSTALL}/include"
+else
+  AC_MSG_RESULT([none — using system GTK4 if available])
+fi
+
 dnl We use GTK+ if possible.
 UISRCS=../dummy/prefs_editor_dummy.cpp
+case "x$WANT_GTK" in
+xgtk4*)
+  WANT_GTK=no
+  PKG_CHECK_MODULES(GTK4, [gtk4 >= 4.0], [
+    GUI_CFLAGS="$GTK4_CFLAGS"
+    GUI_LIBS="$GTK4_LIBS"
+    WANT_GTK=gtk4
+  ], [
+    case "x${WANT_GTK}x" in
+    *gtk2*|*gtkx)
+      AC_MSG_WARN([Could not find GTK4, trying with GTK+ 2.0.])
+      WANT_GTK="gtk2 gtk"
+      ;;
+    *)
+      AC_MSG_WARN([Could not find GTK4, disabling user interface.])
+      WANT_GTK=no
+      ;;
+    esac
+  ])
+  ;;
+esac
 case "x$WANT_GTK" in
 xgtk2*)
   WANT_GTK=no
@@ -384,6 +421,20 @@ if [[ "$WANT_GTK" = "no" ]]; then
 fi
 AC_SUBST(STANDALONE_GUI, [$WANT_STANDALONE_GUI])
 
+dnl We use PulseAudio if possible.
+if [[ "x$WANT_PULSE" = "xyes" ]]; then
+  WANT_PULSE=no
+  PKG_CHECK_MODULES([PULSE], [libpulse-simple], [
+    AC_DEFINE(ENABLE_PULSE, 1, [Define if using PulseAudio.])
+    CFLAGS="$CFLAGS $PULSE_CFLAGS"
+    CXXFLAGS="$CXXFLAGS $PULSE_CFLAGS"
+    LIBS="$LIBS $PULSE_LIBS"
+    WANT_PULSE=yes
+  ], [
+    AC_MSG_WARN([Could not find PulseAudio, disabling PulseAudio support.])
+  ])
+fi
+
 dnl We use ESD if possible.
 if [[ "x$WANT_ESD" = "xyes" ]]; then
   WANT_ESD=no
@@ -402,7 +453,8 @@ dnl We use 64-bit file size support if possible.
 AC_SYS_LARGEFILE
 
 dnl Checks for header files.
-AC_HEADER_STDC
+dnl AC_HEADER_STDC is obsolete in autoconf 2.70+; all modern systems have ANSI C headers.
+AC_DEFINE([STDC_HEADERS], [1], [Define to 1 if you have the ANSI C header files.])
 AC_HEADER_SYS_WAIT
 AC_CHECK_HEADERS(malloc.h stdint.h)
 AC_CHECK_HEADERS(mach/vm_map.h mach/mach_init.h sys/mman.h)
@@ -1751,8 +1803,9 @@ echo XFree86 VidMode support .......... : $WANT_XF86_VIDMODE
 echo Using PowerPC emulator ........... : $EMULATED_PPC
 echo Enable JIT compiler .............. : $WANT_JIT
 echo Enable video on SEGV signals ..... : $WANT_VOSF
+echo PulseAudio sound support ......... : $WANT_PULSE
 echo ESD sound support ................ : $WANT_ESD
-echo GTK user interface ............... : $WANT_GTK
+echo GTK user interface ............... : $WANT_GTK  [gtk4 preferred, gtk2/gtk1 fallback]
 echo mon debugger support ............. : $WANT_MON
 echo Addressing mode .................. : $WANT_ADDRESSING_MODE
 echo Bad memory access recovery type .. : $sigsegv_recovery

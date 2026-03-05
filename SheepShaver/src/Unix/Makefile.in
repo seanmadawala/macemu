@@ -4,6 +4,7 @@
 @SET_MAKE@
 SHELL = /bin/sh
 
+srcdir = @srcdir@
 prefix = @prefix@
 exec_prefix = @exec_prefix@
 bindir = @bindir@
@@ -84,11 +85,34 @@ LIBS += $(GUI_LIBS)
 endif
 
 ## Rules
-.PHONY: modules install uninstall clean distclean depend dep
+.PHONY: modules install uninstall clean distclean depend dep deps
 .SUFFIXES:
 .SUFFIXES: .c .cpp .S .o .h
 
+# Path to the bundled GTK4 deps tree (relative to this Makefile's directory)
+DEPS_DIR        = $(srcdir)/../deps
+DEPS_INSTALL    = $(DEPS_DIR)/install
+DEPS_STAMP      = $(DEPS_INSTALL)/lib/pkgconfig/gtk4.pc
+DEPS_BUILD_SH   = $(DEPS_DIR)/build_deps.sh
+
 all: $(PROGS)
+
+# Build GTK4 4.18.3 + dependencies from bundled sources if not already done.
+# After building, configure must be re-run so that PKG_CONFIG_PATH picks up
+# the new installation.  The Makefile therefore aborts with a clear message
+# the first time, asking the user to re-run configure.
+deps: $(DEPS_STAMP)
+
+$(DEPS_STAMP):
+	@echo ""
+	@echo ">>> Building GTK4 4.18.3 and dependencies into $(DEPS_INSTALL) ..."
+	@echo ""
+	@cd $(DEPS_DIR) && bash build_deps.sh
+	@echo ""
+	@echo ">>> GTK4 built.  Please re-run configure to pick it up:"
+	@echo ">>>   cd $(srcdir) && ./configure && make"
+	@echo ""
+	@exit 1
 
 OBJ_DIR = obj
 $(OBJ_DIR)::
